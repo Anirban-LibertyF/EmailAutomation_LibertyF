@@ -1,0 +1,8 @@
+/vendor/
+/pdfs/*
+!/pdfs/.gitkeep
+/uploads/*
+!/uploads/.gitkeep
+/assets/template/*
+!/assets/template/.gitkeep
+.env
