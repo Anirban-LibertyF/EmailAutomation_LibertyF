@@ -570,6 +570,24 @@ function generate_invitation_pdf_custom($college_name, $ref_number, $formatted_d
     $page_w_mm = 210;
     $page_h_mm = round($page_w_mm * ($h / $w), 2);
 
+    // mPDF doesn't reliably support % for position:absolute top/left, so the
+    // saved percentages (from the click-to-place editor) are converted to mm
+    // here, which it does support.
+    $ref_top_mm = round($page_h_mm * (floatval($tpl['ref_top']) / 100), 2);
+    $ref_left_mm = round($page_w_mm * (floatval($tpl['ref_left']) / 100), 2);
+    $date_top_mm = round($page_h_mm * (floatval($tpl['date_top']) / 100), 2);
+    $date_left_mm = round($page_w_mm * (floatval($tpl['date_left']) / 100), 2);
+    $college_top_mm = round($page_h_mm * (floatval($tpl['college_top']) / 100), 2);
+    $college_left_mm = round($page_w_mm * (floatval($tpl['college_left']) / 100), 2);
+
+    // mPDF's line-breaking can wrap short absolutely-positioned text (most
+    // noticeably pure numbers, e.g. "123" -> "12" / "3") when the element has
+    // no explicit width. Giving it the remaining room to the page's right
+    // edge fixes that without affecting where the text starts.
+    $ref_width_mm = max(10, $page_w_mm - $ref_left_mm - 5);
+    $date_width_mm = max(10, $page_w_mm - $date_left_mm - 5);
+    $college_width_mm = max(10, $page_w_mm - $college_left_mm - 5);
+
     $html = "
     <!DOCTYPE html>
     <html>
@@ -577,24 +595,29 @@ function generate_invitation_pdf_custom($college_name, $ref_number, $formatted_d
         <meta charset='UTF-8'>
         <style>
             @page { margin: 0; }
-            body { margin: 0; padding: 0; font-family: poppins, sans-serif; }
-            .bgpage {
-                position: relative;
+            body {
+                margin: 0;
+                padding: 0;
+                font-family: poppins, sans-serif;
                 width: {$page_w_mm}mm;
                 height: {$page_h_mm}mm;
-                background-image: url('{$imgPath}');
-                background-size: 100% 100%;
-                background-repeat: no-repeat;
             }
-            .overlay { position: absolute; color: #1a1a1a; }
+            /* mPDF doesn't reliably scale CSS background-image (background-size
+               is ignored, so the image gets cropped at natural size instead of
+               stretched to the page) — an <img> sized to the page works instead.
+               It also only positions position:absolute elements correctly
+               relative to the page when they are direct children of <body> —
+               nesting them inside another positioned wrapper div breaks the
+               offsets (they all collapse to the top-left corner instead). */
+            .bg { position: absolute; top: 0; left: 0; width: {$page_w_mm}mm; height: {$page_h_mm}mm; }
+            .overlay { position: absolute; color: #1a1a1a; white-space: nowrap; }
         </style>
     </head>
     <body>
-        <div class='bgpage'>
-            <div class='overlay' style='top:" . $tpl['ref_top'] . "%; left:" . $tpl['ref_left'] . "%; font-size:" . $tpl['ref_font_size'] . "px; font-family: poppinssemibold;'>{$ref_suffix}</div>
-            <div class='overlay' style='top:" . $tpl['date_top'] . "%; left:" . $tpl['date_left'] . "%; font-size:" . $tpl['date_font_size'] . "px; font-family: poppinssemibold;'>{$formatted_date}</div>
-            <div class='overlay' style='top:" . $tpl['college_top'] . "%; left:" . $tpl['college_left'] . "%; font-size:" . $tpl['college_font_size'] . "px; font-family: poppinssemibold;'>" . htmlspecialchars($college_name) . "</div>
-        </div>
+        <img class='bg' src='{$imgPath}'>
+        <div class='overlay' style='top:{$ref_top_mm}mm; left:{$ref_left_mm}mm; width:{$ref_width_mm}mm; font-size:" . $tpl['ref_font_size'] . "px; font-family: poppinssemibold;'>{$ref_suffix}</div>
+        <div class='overlay' style='top:{$date_top_mm}mm; left:{$date_left_mm}mm; width:{$date_width_mm}mm; font-size:" . $tpl['date_font_size'] . "px; font-family: poppinssemibold;'>{$formatted_date}</div>
+        <div class='overlay' style='top:{$college_top_mm}mm; left:{$college_left_mm}mm; width:{$college_width_mm}mm; font-size:" . $tpl['college_font_size'] . "px; font-family: poppinssemibold;'>" . htmlspecialchars($college_name) . "</div>
     </body>
     </html>
     ";
