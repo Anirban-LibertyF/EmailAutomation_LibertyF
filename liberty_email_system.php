@@ -1360,7 +1360,7 @@ function generate_invitation_pdf_default($college_name, $ref_number, $invite_dat
         <div id="upload" class="tab-content active">
             <h2>📤 Upload College Data (Excel File)</h2>
             <p style="color: #666; margin-bottom: 20px; font-size: 14px;">
-                <strong>Format Required:</strong> Column A - College Name | Column B - Email | Column C - Reference Number | Column D - Date (YYYY-MM-DD)<br>
+                <strong>Format Required:</strong> Column A - College Name | Column B - Email | Column C - Reference Number | Column D - Date (DD/MM/YYYY)<br>
                 Example: ABC College | abc@college.com | LF/SKILL/2026/001 | 2024-01-15
             </p>
             
