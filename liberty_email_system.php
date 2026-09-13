@@ -91,6 +91,47 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 
 // ==================== FUNCTIONS ====================
 
+// Converts a date cell from an uploaded Excel file (which may arrive as an
+// Excel date serial number, or as text in several common formats) into the
+// 'Y-m-d' format MySQL's DATE column requires. Returns null if unparseable
+// so the caller can skip the row instead of silently storing '0000-00-00'.
+function parse_excel_date_value($value) {
+    if ($value instanceof \DateTimeInterface) {
+        return $value->format('Y-m-d');
+    }
+
+    $value = trim((string) $value);
+    if ($value === '') {
+        return null;
+    }
+
+    // Raw Excel serial date number (e.g. 45678)
+    if (is_numeric($value)) {
+        try {
+            $dt = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToDateTimeObject((float) $value);
+            return $dt->format('Y-m-d');
+        } catch (Exception $e) {
+            // fall through to text parsing
+        }
+    }
+
+    foreach (['Y-m-d', 'd/m/Y', 'd-m-Y', 'd.m.Y', 'm/d/Y'] as $format) {
+        $dt = DateTime::createFromFormat($format, $value);
+        $errors = DateTime::getLastErrors();
+        if ($dt !== false && (!$errors || ($errors['warning_count'] === 0 && $errors['error_count'] === 0))) {
+            return $dt->format('Y-m-d');
+        }
+    }
+
+    // Last resort: let PHP guess (handles things like "15 Jan 2024")
+    $ts = strtotime($value);
+    if ($ts !== false) {
+        return date('Y-m-d', $ts);
+    }
+
+    return null;
+}
+
 function handle_excel_upload($conn) {
     if (!isset($_FILES['file'])) {
         echo json_encode(['status' => 'error', 'message' => 'No file uploaded']);
@@ -110,24 +151,38 @@ function handle_excel_upload($conn) {
         // Skip header row (row 0)
         for ($i = 1; $i < count($data); $i++) {
             if (empty($data[$i][0])) continue;
-            
+
             $college_name = trim($data[$i][0]);
             $email = trim($data[$i][1]);
-            $reference_number = trim($data[$i][2]);
-            $invitation_date = trim($data[$i][3]);
-            
+            $reference_number = trim($data[$i][2] ?? '');
+            $invitation_date = parse_excel_date_value($data[$i][3] ?? '');
+
             // Validate email
             if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
                 $errors++;
                 continue;
             }
-            
+
+            // Invalid/unparseable date -> skip rather than silently storing 0000-00-00
+            if ($invitation_date === null) {
+                $errors++;
+                continue;
+            }
+
+            if ($reference_number === '') {
+                $reference_number = 'LF/SKILL/2026/' . str_pad(substr(md5($college_name), 0, 3), 3, '0', STR_PAD_LEFT);
+            }
+
             $stmt = $conn->prepare(
-                "INSERT INTO colleges (college_name, email, reference_number, invitation_date, status) 
-                 VALUES (?, ?, ?, ?, 'pending') 
-                 ON DUPLICATE KEY UPDATE email=VALUES(email)"
+                "INSERT INTO colleges (college_name, email, reference_number, invitation_date, status)
+                 VALUES (?, ?, ?, ?, 'pending')
+                 ON DUPLICATE KEY UPDATE
+                    college_name = VALUES(college_name),
+                    reference_number = VALUES(reference_number),
+                    invitation_date = VALUES(invitation_date),
+                    status = 'pending'"
             );
-            
+
             if ($stmt) {
                 $stmt->bind_param("ssss", $college_name, $email, $reference_number, $invitation_date);
                 if ($stmt->execute()) {
@@ -193,7 +248,8 @@ function manual_send_email($data, $conn) {
     $email = trim($data['email'] ?? '');
     $ref_number = trim($data['ref_number'] ?? '');
     $invite_date = trim($data['invite_date'] ?? '');
-    
+    $custom_body = trim($data['email_body'] ?? '');
+
     if (empty($college_name) || empty($email) || empty($ref_number) || empty($invite_date)) {
         echo json_encode(['status' => 'error', 'message' => 'All fields required']);
         return;
@@ -225,38 +281,45 @@ function manual_send_email($data, $conn) {
         $mail->Subject = 'Proposal for Skill Training Partnership - ' . $college_name;
         
         $mail->isHTML(true);
-        $mail->Body = "
-            <html>
-            <body style='font-family: Arial; line-height: 1.6; color: #333;'>
-                <p>Dear Principal/Director,</p>
-                <p>Greetings from <strong>Liberty Foundation</strong>!</p>
-                
-                <p>We are pleased to send you our <strong>Proposal for Skill Training Partnership</strong> for <strong>" . 
-                htmlspecialchars($college_name) . "</strong></p>
-                
-                <p><strong>Details:</strong></p>
-                <ul>
-                    <li><strong>Reference Number:</strong> " . htmlspecialchars($ref_number) . "</li>
-                    <li><strong>Date:</strong> " . $invite_date . "</li>
-                </ul>
-                
-                <p>The detailed proposal letter is attached to this email.</p>
-                
-                <p>We would be grateful for an opportunity to discuss this proposal with you and explore how we can partner to enhance skill development at your institution.</p>
-                
-                <p>Thank you for your time and consideration.</p>
-                
-                <p style='margin-top: 30px;'>Best regards,<br>
-                <strong>" . SENDER_NAME . "</strong><br>
-                " . ORGANIZATION_PHONE . "<br>
-                " . SENDER_EMAIL . "</p>
-            </body>
-            </html>
-        ";
-        
+
+        if ($custom_body !== '') {
+            // Admin wrote their own message — send as-is (line breaks preserved), no PDF-details boilerplate added.
+            $mail->Body = "<html><body style='font-family: Arial; line-height: 1.6; color: #333;'>"
+                . nl2br(htmlspecialchars($custom_body)) . "</body></html>";
+        } else {
+            $mail->Body = "
+                <html>
+                <body style='font-family: Arial; line-height: 1.6; color: #333;'>
+                    <p>Dear Principal/Director,</p>
+                    <p>Greetings from <strong>Liberty Foundation</strong>!</p>
+
+                    <p>We are pleased to send you our <strong>Proposal for Skill Training Partnership</strong> for <strong>" .
+                    htmlspecialchars($college_name) . "</strong></p>
+
+                    <p><strong>Details:</strong></p>
+                    <ul>
+                        <li><strong>Reference Number:</strong> " . htmlspecialchars($ref_number) . "</li>
+                        <li><strong>Date:</strong> " . $invite_date . "</li>
+                    </ul>
+
+                    <p>The detailed proposal letter is attached to this email.</p>
+
+                    <p>We would be grateful for an opportunity to discuss this proposal with you and explore how we can partner to enhance skill development at your institution.</p>
+
+                    <p>Thank you for your time and consideration.</p>
+
+                    <p style='margin-top: 30px;'>Best regards,<br>
+                    <strong>" . SENDER_NAME . "</strong><br>
+                    " . ORGANIZATION_PHONE . "<br>
+                    " . SENDER_EMAIL . "</p>
+                </body>
+                </html>
+            ";
+        }
+
         $mail->addAttachment($pdf_file);
         $mail->send();
-        
+
         echo json_encode(['status' => 'success', 'message' => 'Email sent successfully to ' . $email]);
         
     } catch (Exception $e) {
@@ -1125,13 +1188,16 @@ function generate_invitation_pdf_default($college_name, $ref_number, $invite_dat
         input[type="text"],
         input[type="email"],
         input[type="date"],
-        select {
+        select,
+        textarea {
             width: 100%;
             padding: 12px;
             border: 2px solid #ddd;
             border-radius: 5px;
             font-size: 14px;
+            font-family: inherit;
             transition: border 0.3s;
+            box-sizing: border-box;
         }
         
         input[type="text"]:focus,
@@ -1321,6 +1387,11 @@ function generate_invitation_pdf_default($college_name, $ref_number, $invite_dat
                 </div>
             </div>
             
+            <div class="form-group">
+                <label>Email Body (optional — leave blank to use the default message):</label>
+                <textarea id="manual_body" rows="6" placeholder="Dear Principal/Director,&#10;&#10;Greetings from Liberty Foundation!&#10;...&#10;&#10;(leave blank to use the default email text)"></textarea>
+            </div>
+
             <button onclick="sendManualEmail()">Send Email with PDF</button>
             <div id="manualMessage"></div>
         </div>
@@ -1460,23 +1531,25 @@ function generate_invitation_pdf_default($college_name, $ref_number, $invite_dat
             const email = document.getElementById('manual_email').value.trim();
             const ref = document.getElementById('manual_ref').value.trim();
             const date = document.getElementById('manual_date').value.trim();
-            
+            const body = document.getElementById('manual_body').value.trim();
+
             if (!college || !email || !ref || !date) {
                 showMessage('manualMessage', 'All fields required!', 'error');
                 return;
             }
-            
+
             const btn = event.target;
             btn.disabled = true;
             btn.textContent = 'Sending...';
-            
+
             const formData = new FormData();
             formData.append('action', 'manual_send');
             formData.append('college_name', college);
             formData.append('email', email);
             formData.append('ref_number', ref);
             formData.append('invite_date', date);
-            
+            formData.append('email_body', body);
+
             fetch(window.location.href, { method: 'POST', body: formData })
                 .then(r => r.json())
                 .then(data => {
@@ -1486,6 +1559,7 @@ function generate_invitation_pdf_default($college_name, $ref_number, $invite_dat
                         document.getElementById('manual_email').value = '';
                         document.getElementById('manual_ref').value = '';
                         document.getElementById('manual_date').value = '';
+                        document.getElementById('manual_body').value = '';
                     }
                     btn.disabled = false;
                     btn.textContent = 'Send Email with PDF';
@@ -1514,6 +1588,14 @@ function generate_invitation_pdf_default($college_name, $ref_number, $invite_dat
             loadColleges();
         }
         
+        function formatDateDDMMYYYY(mysqlDate) {
+            if (!mysqlDate || mysqlDate === '0000-00-00') return '<em style="color:#c00;">(invalid)</em>';
+            const parts = String(mysqlDate).split('-');
+            if (parts.length !== 3) return mysqlDate;
+            const [y, m, d] = parts;
+            return `${d}/${m}/${y}`;
+        }
+
         function renderTable(colleges) {
             if (colleges.length === 0) {
                 document.getElementById('collegeTableContainer').innerHTML = 
@@ -1538,13 +1620,15 @@ function generate_invitation_pdf_default($college_name, $ref_number, $invite_dat
             `;
             
             colleges.forEach((c, idx) => {
+                const refDisplay = c.reference_number ? c.reference_number : '<em style="color:#c00;">(missing)</em>';
+                const dateDisplay = formatDateDDMMYYYY(c.invitation_date);
                 html += `
                     <tr>
                         <td>${c.id}</td>
                         <td>${c.college_name}</td>
                         <td>${c.email}</td>
-                        <td>${c.reference_number}</td>
-                        <td>${c.invitation_date}</td>
+                        <td>${refDisplay}</td>
+                        <td>${dateDisplay}</td>
                         <td><span class="status-${c.status}">${c.status}</span></td>
                         <td><button class="action-btn" onclick="sendEmail(${c.id})">Send</button></td>
                     </tr>
