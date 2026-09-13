@@ -147,25 +147,30 @@ function handle_excel_upload($conn) {
         
         $imported = 0;
         $errors = 0;
-        
+        $error_details = [];
+
         // Skip header row (row 0)
         for ($i = 1; $i < count($data); $i++) {
             if (empty($data[$i][0])) continue;
 
+            $row_num = $i + 1; // human-friendly row number (matches what you'd see in Excel)
             $college_name = trim($data[$i][0]);
-            $email = trim($data[$i][1]);
+            $email = trim($data[$i][1] ?? '');
             $reference_number = trim($data[$i][2] ?? '');
-            $invitation_date = parse_excel_date_value($data[$i][3] ?? '');
+            $date_raw = $data[$i][3] ?? '';
+            $invitation_date = parse_excel_date_value($date_raw);
 
             // Validate email
             if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
                 $errors++;
+                $error_details[] = "Row $row_num: invalid email '$email'";
                 continue;
             }
 
             // Invalid/unparseable date -> skip rather than silently storing 0000-00-00
             if ($invitation_date === null) {
                 $errors++;
+                $error_details[] = "Row $row_num: could not read date '" . $date_raw . "' (use DD/MM/YYYY)";
                 continue;
             }
 
@@ -189,14 +194,23 @@ function handle_excel_upload($conn) {
                     $imported++;
                 } else {
                     $errors++;
+                    $error_details[] = "Row $row_num: database error - " . $stmt->error;
                 }
                 $stmt->close();
             }
         }
-        
+
+        $message = "Imported: $imported colleges, Errors: $errors";
+        if (!empty($error_details)) {
+            $message .= "\n" . implode("\n", array_slice($error_details, 0, 10));
+            if (count($error_details) > 10) {
+                $message .= "\n...and " . (count($error_details) - 10) . " more";
+            }
+        }
+
         echo json_encode([
             'status' => 'success',
-            'message' => "Imported: $imported colleges, Errors: $errors"
+            'message' => $message
         ]);
     } catch (Exception $e) {
         echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
@@ -1690,7 +1704,8 @@ function generate_invitation_pdf_default($college_name, $ref_number, $invite_dat
         
         function showMessage(elementId, message, type) {
             const el = document.getElementById(elementId);
-            el.innerHTML = `<div class="message ${type}">💬 ${message}</div>`;
+            const safe = String(message).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+            el.innerHTML = `<div class="message ${type}">💬 ${safe}</div>`;
         }
 
         // ==================== TEMPLATE DESIGN TAB ====================
